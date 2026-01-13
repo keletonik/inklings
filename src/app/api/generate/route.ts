@@ -19,15 +19,15 @@ export async function POST(request: NextRequest) {
     const client = await Client.connect("Tongyi-MAI/Z-Image-Turbo");
 
     console.log("[Inklings] Generating...");
-    const result = await client.predict("/Z_Image_Turbo_generate", {
-      gallery_images: [],
-      prompt: fullPrompt,
-      random_seed: true,
-      resolution: "1024x1024 ( 1:1 )",
-      seed: Math.floor(Math.random() * 999999),
-      shift: 3,
-      steps: 8,
-    });
+    const result = await client.predict(0, [
+      [],
+      fullPrompt,
+      true,
+      "1024x1024 ( 1:1 )",
+      Math.floor(Math.random() * 999999),
+      3,
+      8,
+    ]);
 
     console.log("[Inklings] Result:", JSON.stringify(result.data).slice(0, 300));
 
