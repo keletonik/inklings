@@ -1,101 +1,107 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Client } from "@gradio/client";
 
 const STYLE_PREFIX = `Coloring book page illustration, black and white line art, clean bold outlines, no shading, no gradients, no color fill, no grayscale, simple design suitable for children to color in, white background, thick black lines, cartoon style, cute and friendly, `;
+const SPACE_URL = "https://tongyi-mai-z-image-turbo.hf.space";
+
+export const maxDuration = 120;
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
+  const logs: string[] = [];
+  const log = (m: string) => { logs.push(m); console.log(`[Inklings] ${m}`); };
+
   try {
     const { prompt } = await request.json();
-
-    if (!prompt || typeof prompt !== "string") {
-      return NextResponse.json(
-        { error: "Please describe what you'd like to color!" },
-        { status: 400 }
-      );
+    if (!prompt?.trim()) {
+      return NextResponse.json({ success: false, error: "Please enter a prompt!" }, { status: 400 });
     }
 
-    const sanitizedPrompt = prompt.trim().slice(0, 200);
-    const fullPrompt = `${STYLE_PREFIX}${sanitizedPrompt}`;
-
-    console.log(`[Inklings] Generating: ${sanitizedPrompt.slice(0, 50)}...`);
-
-    // Connect to public Gradio Space - no auth needed
-    const app = await Client.connect("Tongyi-MAI/Z-Image-Turbo");
+    const fullPrompt = `${STYLE_PREFIX}${prompt.trim().slice(0, 200)}`;
+    const session = `s${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
     
-    const result = await app.predict("/Z_Image_Turbo_generate", {
-      prompt: fullPrompt,
-      resolution: "1024x1024 ( 1:1 )",
-      steps: 8,
-      random_seed: true,
+    log(`Starting generation for: "${prompt.slice(0, 30)}..."`);
+
+    const joinRes = await fetch(`${SPACE_URL}/queue/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        data: [[], fullPrompt, true, "1024x1024 ( 1:1 )", 42, 3, 8],
+        fn_index: 0,
+        session_hash: session,
+      }),
     });
 
-    console.log("[Inklings] Raw result:", JSON.stringify(result.data).slice(0, 500));
+    if (!joinRes.ok) {
+      const txt = await joinRes.text();
+      log(`Queue join failed: ${joinRes.status} - ${txt.slice(0, 200)}`);
+      throw new Error("Queue join failed");
+    }
+    log("Joined queue");
 
-    // Extract image URL from result
-    // Response format: [gallery_images_array, seed_str, seed_int]
-    const data = result.data as unknown[];
-    const gallery = data[0];
-    
+    const dataRes = await fetch(`${SPACE_URL}/queue/data?session_hash=${session}`);
+    if (!dataRes.ok || !dataRes.body) throw new Error("SSE connect failed");
+
+    const reader = dataRes.body.getReader();
+    const decoder = new TextDecoder();
     let imageUrl: string | null = null;
-    
-    if (Array.isArray(gallery) && gallery.length > 0) {
-      const firstImage = gallery[0];
-      if (typeof firstImage === "object" && firstImage !== null) {
-        // Could be {image: {url: string}} or {url: string} or just string
-        const img = firstImage as Record<string, unknown>;
-        if (img.image && typeof img.image === "object") {
-          imageUrl = (img.image as Record<string, unknown>).url as string;
-        } else if (img.url) {
-          imageUrl = img.url as string;
+    let buffer = "";
+
+    for (let i = 0; i < 200 && !imageUrl; i++) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const evt = JSON.parse(line.slice(6));
+          log(`Event: ${evt.msg}`);
+
+          if (evt.msg === "process_completed" && evt.output?.data) {
+            const gallery = evt.output.data[0];
+            if (Array.isArray(gallery) && gallery[0]) {
+              const img = gallery[0];
+              imageUrl = img.image?.url || img.image?.path || img.url || img.path || null;
+            }
+          }
+          if (evt.msg === "error") throw new Error(evt.error || "Generation error");
+        } catch (e) {
+          if (!(e instanceof SyntaxError)) throw e;
         }
-      } else if (typeof firstImage === "string") {
-        imageUrl = firstImage;
       }
     }
+    reader.cancel();
 
     if (!imageUrl) {
-      console.error("[Inklings] Could not extract image URL from:", JSON.stringify(data));
-      throw new Error("No image returned from generator");
+      log("No image URL found");
+      throw new Error("No image generated");
+    }
+    log(`Got image: ${imageUrl.slice(0, 80)}...`);
+
+    if (imageUrl.startsWith("data:")) {
+      return NextResponse.json({ success: true, image: imageUrl, prompt: prompt.trim() });
     }
 
-    console.log(`[Inklings] Fetching image from: ${imageUrl.slice(0, 100)}...`);
+    const imgRes = await fetch(imageUrl);
+    if (!imgRes.ok) throw new Error(`Image fetch failed: ${imgRes.status}`);
 
-    // Fetch the image and convert to base64
-    const imageResponse = await fetch(imageUrl);
-    if (!imageResponse.ok) {
-      throw new Error(`Failed to fetch image: ${imageResponse.status}`);
-    }
-    
-    const arrayBuffer = await imageResponse.arrayBuffer();
-    const base64 = Buffer.from(arrayBuffer).toString("base64");
+    const buf = await imgRes.arrayBuffer();
+    const b64 = Buffer.from(buf).toString("base64");
+    const mime = imgRes.headers.get("content-type")?.includes("jpeg") ? "image/jpeg" : "image/png";
 
-    return NextResponse.json({
-      success: true,
-      image: `data:image/png;base64,${base64}`,
-      prompt: sanitizedPrompt,
-    });
+    log(`Done! ${buf.byteLength} bytes`);
+    return NextResponse.json({ success: true, image: `data:${mime};base64,${b64}`, prompt: prompt.trim() });
+
   } catch (err) {
-    console.error("[Inklings] Generation error:", err);
-    
     const msg = err instanceof Error ? err.message : String(err);
-    
-    if (msg.includes("rate limit") || msg.includes("429") || msg.includes("queue") || msg.includes("exceeded")) {
-      return NextResponse.json(
-        { error: "The coloring machine is busy! Please wait a moment and try again." },
-        { status: 429 }
-      );
-    }
-
-    return NextResponse.json(
-      { error: "Oops! Something went wrong. Please try again!" },
-      { status: 500 }
-    );
+    log(`ERROR: ${msg}`);
+    return NextResponse.json({ success: false, error: "Generation failed - please try again!", logs }, { status: 500 });
   }
 }
 
 export async function GET() {
-  return NextResponse.json({
-    status: "ok",
-    message: "Inklings coloring page generator is ready!",
-  });
+  return NextResponse.json({ status: "ready", space: "Tongyi-MAI/Z-Image-Turbo" });
 }
