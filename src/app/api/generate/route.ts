@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Client } from "@gradio/client";
 
-const STYLE_PREFIX = `Coloring book page illustration, black and white line art, clean bold outlines, no shading, no gradients, no color fill, no grayscale, simple design suitable for children to color in, white background, thick black lines, cartoon style, cute and friendly, `;
+const STYLE_PREFIX = `Coloring book page, black and white line art only, clean bold outlines, no shading, no color, white background, thick black lines, cartoon style, cute, simple design for children to color, `;
 
-export const maxDuration = 120;
+export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
@@ -15,32 +15,32 @@ export async function POST(request: NextRequest) {
 
     const fullPrompt = `${STYLE_PREFIX}${prompt.trim().slice(0, 200)}`;
     
-    console.log("[Inklings] Connecting...");
-    const client = await Client.connect("Tongyi-MAI/Z-Image-Turbo");
+    console.log("[Inklings] Connecting to Qwen-Image-Fast...");
+    const client = await Client.connect("multimodalart/Qwen-Image-Fast");
 
     console.log("[Inklings] Generating...");
-    const result = await client.predict(0, [
-      [],
-      fullPrompt,
-      true,
-      "1024x1024 ( 1:1 )",
-      Math.floor(Math.random() * 999999),
-      3,
-      8,
-    ]);
+    const result = await client.predict("/Qwen_Image_Fast_infer", {
+      prompt: fullPrompt,
+      aspect_ratio: "1:1",
+      guidance_scale: 1,
+      num_inference_steps: 8,
+      prompt_enhance: false,
+      randomize_seed: true,
+      seed: Math.floor(Math.random() * 999999),
+    });
 
-    console.log("[Inklings] Result:", JSON.stringify(result.data).slice(0, 300));
-
+    console.log("[Inklings] Got result");
     const data = result.data as any[];
-    if (!data?.[0]?.[0]) throw new Error("No image in response");
+    
+    if (!data?.[0]?.url && !data?.[0]?.path && typeof data?.[0] !== 'string') {
+      console.log("[Inklings] Data structure:", JSON.stringify(data).slice(0, 500));
+      throw new Error("No image in response");
+    }
 
-    const img = data[0][0];
-    const imageUrl = img.image?.url || img.image?.path || img.url || img.path;
-    if (!imageUrl) throw new Error("No image URL");
+    let imageUrl = data[0]?.url || data[0]?.path || data[0];
+    console.log("[Inklings] URL:", String(imageUrl).slice(0, 100));
 
-    console.log("[Inklings] URL:", imageUrl.slice(0, 80));
-
-    if (imageUrl.startsWith("data:")) {
+    if (typeof imageUrl === 'string' && imageUrl.startsWith("data:")) {
       return NextResponse.json({ success: true, image: imageUrl, prompt: prompt.trim() });
     }
 
@@ -53,8 +53,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, image: `data:${mime};base64,${b64}`, prompt: prompt.trim() });
 
-  } catch (err) {
-    console.error("[Inklings] Error:", err);
+  } catch (err: any) {
+    console.error("[Inklings] Error:", err?.message || err);
     return NextResponse.json({ success: false, error: "Generation failed - try again!" }, { status: 500 });
   }
 }
